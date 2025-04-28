@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Heng", email = "31088159+shiukaheng@users.noreply.github.com" }
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "beartype>=0.20.2",
     "ipykernel>=6.29.5",
