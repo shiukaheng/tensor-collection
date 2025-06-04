@@ -1,1 +1,2 @@
-from tensor_collection.tensor_collection import TensorCollection, batch_tensor_collections
+from tensor_collection.tensor_collection import TensorCollection
+from tensor_collection.batch_tensor_collections import batch_tensor_collections
