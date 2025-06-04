@@ -22,7 +22,7 @@ T = TypeVar("T", bound=TensorCollection)
 # Built-in aggregators
 # --------------------------------------------------------------------------- #
 
-def _stack_tensors(values: List[torch.Tensor]) -> torch.Tensor:
+def stack_tensors(values: List[torch.Tensor]) -> torch.Tensor:
     """
     Stack a list of tensors (or Parameters) along a new leading dimension.
 
@@ -46,17 +46,20 @@ def _stack_tensors(values: List[torch.Tensor]) -> torch.Tensor:
     return torch.stack(values, dim=0)
 
 
-def _list_values(values: List[Any]) -> List[Any]:
+def stack_arbitrary(values: List[Any]) -> List[Any]:
     """Fallback aggregator: simply collect items into a list."""
     return list(values)
 
-
-# Public aliases ------------------------------------------------------------- #
-TENSOR_STACK_AGGREGATOR: Callable[[List[torch.Tensor]], torch.Tensor] = _stack_tensors
-LIST_AGGREGATOR: Callable[[List[Any]], List[Any]] = _list_values
+def undefined_aggregator(values: List[Any]) -> Any:
+    """
+    Placeholder aggregator that raises an error if called.
+    Useful for debugging or as a default in type_aggregators.
+    """
+    raise NotImplementedError("Unhandled property encountered during batching, "
+                              "please define an appropriate aggregator for this type or field.")
 
 DEFAULT_TYPE_AGGREGATORS: Dict[Type[Any], Callable[[List[Any]], Any]] = {
-    torch.Tensor: TENSOR_STACK_AGGREGATOR,  # also matches nn.Parameter
+    torch.Tensor: stack_tensors,  # also matches nn.Parameter
 }
 
 # --------------------------------------------------------------------------- #
@@ -67,33 +70,38 @@ def batch_tensor_collections(
     collections: List[T],
     *,
     type_aggregators: Dict[Type[Any], Callable[[List[Any]], Any]] = DEFAULT_TYPE_AGGREGATORS,
-    default_type_aggregator: Callable[[List[Any]], Any] = LIST_AGGREGATOR,
+    default_type_aggregator: Callable[[List[Any]], Any] = undefined_aggregator,
+    field_aggregators: Dict[str, Callable[[List[Any]], Any]] = {},
 ) -> T:
     """
-    Batch together a list of ``TensorCollection`` instances.
+    Batch together a list of TensorCollection instances, with fine-grained control
+    over how each field is aggregated via type-based or field-specific functions.
+
+    Precedence for aggregator resolution:
+    1. field_aggregators[field_name]
+    2. type_aggregators[type(value)] (via isinstance)
+    3. default_type_aggregator
 
     Parameters
     ----------
-    collections
-        Instances of the **same** ``TensorCollection`` subclass to be batched.
-    type_aggregators
-        Mapping from *type* → *callable* that knows how to reduce a list of that
-        type into a single batched object.  If omitted, uses
-        ``DEFAULT_TYPE_AGGREGATORS``.
-    default_type_aggregator
-        Fallback reducer for unseen types.  If ``None`` (default) and a field’s
-        value type is not found in *either* mapping, a ``TypeError`` is raised.
+    collections : List[T]
+        A non-empty list of TensorCollection instances of the same subclass.
+
+    type_aggregators : dict
+        Mapping from type -> function(List[Any]) -> Any, used to batch fields
+        by type.
+
+    default_type_aggregator : Callable
+        Fallback function used when a field's type is not matched in the above.
+
+    field_aggregators : dict
+        Mapping from field name -> function(List[Any]) -> Any, which overrides
+        all type-based aggregators for that field.
 
     Returns
     -------
-    T
-        A *new* instance of the same subclass with each field aggregated across
-        the leading batch dimension.
-
-    Notes
-    -----
-    * Leaf parameters remain intact, so gradients flow back to the originals.
-    * Nested ``TensorCollection`` fields are batched **recursively**.
+    T : TensorCollection
+        A single batched instance of the same subclass.
     """
     if not collections:
         raise ValueError("Expected a non-empty list of TensorCollections.")
@@ -102,36 +110,34 @@ def batch_tensor_collections(
     if any(type(c) is not cls for c in collections):
         raise TypeError("All items must be instances of the same TensorCollection subclass.")
 
-    # Merge user-defined mapping over the defaults, keeping user overrides.
+    # Compose type aggregator map
     agg_map: Dict[Type[Any], Callable[[List[Any]], Any]] = {
         **DEFAULT_TYPE_AGGREGATORS,
-        **type_aggregators,  # no need for `or {}` since default is non-None
+        **type_aggregators,
     }
-    # Local helper ----------------------------------------------------------- #
-    def _get_aggregator(v: Any) -> Callable[[List[Any]], Any]:
+
+    # Resolve aggregator per field
+    def _get_aggregator(name: str, v: Any) -> Callable[[List[Any]], Any]:
+        if name in field_aggregators:
+            return field_aggregators[name]
         for typ, fn in agg_map.items():
             if isinstance(v, typ):
                 return fn
-        if isinstance(v, TensorCollection):  # recurse by default
+        if isinstance(v, TensorCollection):
             return lambda xs: batch_tensor_collections(
                 xs,
                 type_aggregators=agg_map,
                 default_type_aggregator=default_type_aggregator,
+                field_aggregators=field_aggregators,
             )
-        if default_type_aggregator is not None:
-            return default_type_aggregator
-        raise TypeError(
-            f"No aggregator registered for type {type(v).__name__!r} "
-            "and no default_type_aggregator provided."
-        )
+        return default_type_aggregator
 
-    # Aggregate each dataclass field ---------------------------------------- #
+    # Aggregate all fields
     aggregated_fields = {}
     for field in cls.__dataclass_fields__.values():  # type: ignore[attr-defined]
         name = field.name
         values = [getattr(c, name) for c in collections]
-        aggregator = _get_aggregator(values[0])
+        aggregator = _get_aggregator(name, values[0])
         aggregated_fields[name] = aggregator(values)
 
-    # Construct the batched TensorCollection -------------------------------- #
     return cls(**aggregated_fields)
