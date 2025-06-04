@@ -1,2 +1,1 @@
-from .bounded_parameter import bounded_parameter
-from .TensorCollection import TensorCollection
+from tensor_collection.tensor_collection import TensorCollection, batch_tensor_collections
